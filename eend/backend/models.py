@@ -4,7 +4,7 @@
 # Copyright 2022 Brno University of Technology (author: Federico Landini)
 # Licensed under the MIT license.
 
-from os.path import isfile, join
+import os
 
 from backend.losses import (
     pit_loss_multispk,
@@ -25,6 +25,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 import logging
 
+from fairseq.models.hubert.speakervec2 import Speakervec2Model
 
 """
 T: number of frames
@@ -392,6 +393,137 @@ class TransformerEDADiarization(Module):
         return loss + vad_loss_value * vad_loss_weight + \
             attractor_loss * self.attractor_loss_ratio, loss
 
+class SpeakervecEDADiarization(Module):
+
+    def __init__(
+        self,
+        device: torch.device,
+        pretrained_path: str,
+    ) -> None:
+        """ Self-attention-based diarization model.
+        Args:
+          in_size (int): Dimension of input feature vector
+          n_units (int): Number of units in a self-attention block
+          n_heads (int): Number of attention heads
+          n_layers (int): Number of transformer-encoder layers
+          dropout (float): dropout ratio
+          vad_loss_weight (float) : weight for vad_loss
+          attractor_loss_ratio (float)
+          attractor_encoder_dropout (float)
+          attractor_decoder_dropout (float)
+        """
+        self.device = device
+        # super(TransformerEDADiarization, self).__init__()
+        speakervec_encoder = Speakervec2Model.from_pretrained(
+                os.path.dirname(pretrained_path),
+                checkpoint_file=os.path.basename(pretrained_path),
+        )
+        speakervec_model = speakervec_encoder.models[0]
+        speakervec_config = speakervec_encoder.cfg
+        print(f'speakervec_encoder: {speakervec_config}')
+        exit()
+        # self.enc = TransformerEncoder(
+        #     self.device, in_size, n_layers, n_units, e_units, n_heads, dropout
+        # )
+        self.eda = EncoderDecoderAttractor(
+            self.device,
+            n_units,
+            attractor_encoder_dropout,
+            attractor_decoder_dropout,
+            detach_attractor_loss,
+        )
+        self.attractor_loss_ratio = attractor_loss_ratio
+        self.vad_loss_weight = vad_loss_weight
+
+    def get_embeddings(self, xs: torch.Tensor) -> torch.Tensor:
+        ilens = [x.shape[0] for x in xs]
+        # xs: (B, T, F)
+        pad_shape = xs.shape
+        # emb: (B*T, E)
+        emb = self.enc(xs)
+        # emb: [(T, E), ...]
+        emb = emb.reshape(pad_shape[0], pad_shape[1], -1)
+        return emb
+
+    def estimate_sequential(
+        self,
+        xs: torch.Tensor,
+        args: SimpleNamespace
+    ) -> List[torch.Tensor]:
+        assert args.estimate_spk_qty_thr != -1 or \
+            args.estimate_spk_qty != -1, \
+            "Either 'estimate_spk_qty_thr' or 'estimate_spk_qty' \
+            arguments have to be defined."
+        emb = self.get_embeddings(xs)
+        ys_active = []
+        if args.time_shuffle:
+            orders = [np.arange(e.shape[0]) for e in emb]
+            for order in orders:
+                np.random.shuffle(order)
+            attractors, probs = self.eda.estimate(
+                torch.stack([e[order] for e, order in zip(emb, orders)]))
+        else:
+            attractors, probs = self.eda.estimate(emb)
+        ys = torch.matmul(emb, attractors.permute(0, 2, 1))
+        ys = [torch.sigmoid(y) for y in ys]
+        for p, y in zip(probs, ys):
+            if args.estimate_spk_qty != -1:
+                sorted_p, order = torch.sort(p, descending=True)
+                ys_active.append(y[:, order[:args.estimate_spk_qty]])
+            elif args.estimate_spk_qty_thr != -1:
+                silence = np.where(
+                    p.data.to("cpu") < args.estimate_spk_qty_thr)[0]
+                n_spk = silence[0] if silence.size else None
+                ys_active.append(y[:, :n_spk])
+            else:
+                NotImplementedError(
+                    'estimate_spk_qty or estimate_spk_qty_thr needed.')
+        return ys_active
+
+    def forward(
+        self,
+        xs: torch.Tensor,
+        ts: torch.Tensor,
+        n_speakers: List[int],
+        args: SimpleNamespace
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        emb = self.get_embeddings(xs)
+
+        if args.time_shuffle:
+            orders = [np.arange(e.shape[0]) for e in emb]
+            for order in orders:
+                np.random.shuffle(order)
+            attractor_loss, attractors = self.eda(
+                torch.stack([e[order] for e, order in zip(emb, orders)]),
+                n_speakers)
+        else:
+            attractor_loss, attractors = self.eda(emb, n_speakers)
+
+        # ys: [(T, C), ...]
+        ys = torch.matmul(emb, attractors.permute(0, 2, 1))
+        return ys, attractor_loss
+
+    def get_loss(
+        self,
+        ys: torch.Tensor,
+        target: torch.Tensor,
+        n_speakers: List[int],
+        attractor_loss: torch.Tensor,
+        vad_loss_weight: float,
+        detach_attractor_loss: bool
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        max_n_speakers = max(n_speakers)
+        ts_padded = pad_labels(target, max_n_speakers)
+        ts_padded = torch.stack(ts_padded)
+        ys_padded = pad_labels(ys, max_n_speakers)
+        ys_padded = torch.stack(ys_padded)
+
+        loss = pit_loss_multispk(
+            ys_padded, ts_padded, n_speakers, detach_attractor_loss)
+        vad_loss_value = vad_loss(ys, target)
+
+        return loss + vad_loss_value * vad_loss_weight + \
+            attractor_loss * self.attractor_loss_ratio, loss
 
 def pad_labels(ts: torch.Tensor, out_size: int) -> torch.Tensor:
     # pad label's speaker-dim to be model's n_speakers
@@ -461,7 +593,7 @@ def load_checkpoint(args: SimpleNamespace, filename: str):
     model = get_model(args)
     optimizer = setup_optimizer(args, model)
 
-    assert isfile(filename), \
+    assert os.path.isfile(filename), \
         f"File {filename} does not exist."
     checkpoint = torch.load(filename)
     model.load_state_dict(checkpoint['model_state_dict'])
@@ -491,6 +623,11 @@ def get_model(args: SimpleNamespace) -> Module:
             detach_attractor_loss=args.detach_attractor_loss,
             vad_loss_weight=args.vad_loss_weight,
         )
+    elif args.model_type == 'SpeakervecEDA':
+        model = SpeakervecEDADiarization(
+            device=args.device,
+            pretrained_path=args.pretrained_speakervec_path,
+        )
     else:
         raise ValueError('Possible model_type is "TransformerEDA"')
     return model
@@ -506,7 +643,7 @@ def average_checkpoints(
     states_dict_list = []
     for e in epochs:
         copy_model = copy.deepcopy(model)
-        checkpoint = torch.load(join(
+        checkpoint = torch.load(os.path.join(
             models_path,
             f"checkpoint_{e}.tar"), map_location=device)
         copy_model.load_state_dict(checkpoint['model_state_dict'])
