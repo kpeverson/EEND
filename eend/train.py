@@ -169,7 +169,9 @@ def parse_arguments() -> SimpleNamespace:
                         help='Minimum number of frames for the sequences'
                              ' after downsampling.')
     parser.add_argument('--model-type', default='TransformerEDA',
-                        help='Type of model (for now only TransformerEDA)')
+                        help='Type of model (for now only TransformerEDA, SpeakervecEDA)')
+    parser.add_argument('--pretrained-speakervec-path', default='',
+                        help='specify the path of Speakervec model')
     parser.add_argument('--noam-warmup-steps', default=100000, type=float)
     parser.add_argument('--num-frames', default=500, type=int,
                         help='number of frames in one utterance')
@@ -234,8 +236,6 @@ if __name__ == '__main__':
     writer = SummaryWriter(f"{args.output_path}/tensorboard")
     log_file = os.path.join(args.output_path, 'train.log')
 
-    train_loader, dev_loader = get_training_dataloaders(args)
-
     if args.gpu >= 1:
         gpuid = use_single_gpu(args.gpu)
         logging.info('GPU device {} is used'.format(gpuid))
@@ -253,6 +253,8 @@ if __name__ == '__main__':
         model = average_checkpoints(
             args.device, model, args.init_model_path, args.init_epochs)
         optimizer = setup_optimizer(args, model)
+
+    train_loader, dev_loader = get_training_dataloaders(args)
 
     train_batches_qty = len(train_loader)
     dev_batches_qty = len(dev_loader)
