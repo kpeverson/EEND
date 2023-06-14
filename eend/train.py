@@ -67,7 +67,7 @@ def compute_loss_and_metrics(
     acum_metrics['loss'] += loss.item()
     acum_metrics['loss_standard'] += standard_loss.item()
     acum_metrics['loss_attractor'] += attractor_loss.item()
-    return loss, acum_metrics
+    return loss, acum_metrics, {'standard': standard_loss.item(), 'attractor': attractor_loss.item()}
 
 
 def get_training_dataloaders(
@@ -179,6 +179,7 @@ def parse_arguments() -> SimpleNamespace:
                         help='number of workers in train DataLoader')
     parser.add_argument('--optimizer', default='adam', type=str)
     parser.add_argument('--output-path', type=str)
+    parser.add_argument('--log_interval', default=10, type=int)
     parser.add_argument('--sampling-rate', type=int)
     parser.add_argument('--seed', type=int)
     parser.add_argument('--subsampling', default=10, type=int)
@@ -228,14 +229,17 @@ if __name__ == '__main__':
     os.environ['PYTHONHASHSEED'] = str(args.seed)
 
     logging.info(args)
+    print(args)
 
     writer = SummaryWriter(f"{args.output_path}/tensorboard")
+    log_file = os.path.join(args.output_path, 'train.log')
 
     train_loader, dev_loader = get_training_dataloaders(args)
 
     if args.gpu >= 1:
         gpuid = use_single_gpu(args.gpu)
         logging.info('GPU device {} is used'.format(gpuid))
+        print('GPU device {} is used'.format(gpuid))
         args.device = torch.device("cuda")
     else:
         gpuid = -1
@@ -254,6 +258,8 @@ if __name__ == '__main__':
     dev_batches_qty = len(dev_loader)
     logging.info(f"#batches quantity for train: {train_batches_qty}")
     logging.info(f"#batches quantity for dev: {dev_batches_qty}")
+    print(f"#batches quantity for train: {train_batches_qty}")
+    print(f"#batches quantity for dev: {dev_batches_qty}")
 
     acum_train_metrics = new_metrics()
     acum_dev_metrics = new_metrics()
@@ -273,60 +279,77 @@ if __name__ == '__main__':
         # Save initial model
         save_checkpoint(args, init_epoch, model, optimizer, 0)
 
-    for epoch in range(init_epoch, args.max_epochs):
-        model.train()
-        for i, batch in enumerate(train_loader):
-            features = batch['xs']
-            labels = batch['ts']
-            n_speakers = np.asarray([max(torch.where(t.sum(0) != 0)[0]) + 1
-                                     if t.sum() > 0 else 0 for t in labels])
-            max_n_speakers = max(n_speakers)
-            features, labels = pad_sequence(features, labels, args.num_frames)
-            labels = pad_labels(labels, max_n_speakers)
-            features = torch.stack(features).to(args.device)
-            labels = torch.stack(labels).to(args.device)
-            loss, acum_train_metrics = compute_loss_and_metrics(
-                model, labels, features, n_speakers, acum_train_metrics,
-                args.vad_loss_weight,
-                args.detach_attractor_loss)
-            if i % args.log_report_batches_num == \
-                    (args.log_report_batches_num-1):
-                for k in acum_train_metrics.keys():
-                    writer.add_scalar(
-                        f"train_{k}",
-                        acum_train_metrics[k] / args.log_report_batches_num,
-                        epoch * train_batches_qty + i)
-                writer.add_scalar(
-                    "lrate",
-                    get_rate(optimizer),
-                    epoch * train_batches_qty + i)
-                acum_train_metrics = reset_metrics(acum_train_metrics)
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.gradclip)
-            optimizer.step()
-
-        save_checkpoint(args, epoch+1, model, optimizer, loss)
-
-        with torch.no_grad():
-            model.eval()
-            for i, batch in enumerate(dev_loader):
+    with open(log_file, 'w') as wf:
+        for epoch in range(init_epoch, args.max_epochs):
+            model.train()
+            for i, batch in enumerate(train_loader):
                 features = batch['xs']
                 labels = batch['ts']
                 n_speakers = np.asarray([max(torch.where(t.sum(0) != 0)[0]) + 1
                                         if t.sum() > 0 else 0 for t in labels])
                 max_n_speakers = max(n_speakers)
-                features, labels = pad_sequence(
-                    features, labels, args.num_frames)
+                features, labels = pad_sequence(features, labels, args.num_frames)
                 labels = pad_labels(labels, max_n_speakers)
                 features = torch.stack(features).to(args.device)
                 labels = torch.stack(labels).to(args.device)
-                _, acum_dev_metrics = compute_loss_and_metrics(
-                    model, labels, features, n_speakers, acum_dev_metrics,
+                loss, acum_train_metrics, separate_losses = compute_loss_and_metrics(
+                    model, labels, features, n_speakers, acum_train_metrics,
                     args.vad_loss_weight,
                     args.detach_attractor_loss)
-        for k in acum_dev_metrics.keys():
-            writer.add_scalar(
-                f"dev_{k}", acum_dev_metrics[k] / dev_batches_qty,
-                epoch * dev_batches_qty + i)
-        acum_dev_metrics = reset_metrics(acum_dev_metrics)
+                if i % args.log_report_batches_num == \
+                        (args.log_report_batches_num-1):
+                    for k in acum_train_metrics.keys():
+                        writer.add_scalar(
+                            f"train_{k}",
+                            acum_train_metrics[k] / args.log_report_batches_num,
+                            epoch * train_batches_qty + i)
+                    writer.add_scalar(
+                        "lrate",
+                        get_rate(optimizer),
+                        epoch * train_batches_qty + i)
+                    acum_train_metrics = reset_metrics(acum_train_metrics)
+                optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.gradclip)
+                optimizer.step()
+                print(f'batch {i}, acum_train_metrics: {acum_train_metrics}')
+                if i%args.log_interval==0:
+                    if i==0:
+                        avg_loss = loss.item()
+                        avg_standard = separate_losses['standard']
+                        avg_attractor = separate_losses['attractor']
+                    else:
+                        avg_loss = sum(losses_to_log)/len(losses_to_log)
+                        avg_standard = sum(standard_losses_to_log)/len(standard_losses_to_log)
+                        avg_attractor = sum(attractor_losses_to_log)/len(attractor_losses_to_log)
+                    print(f'epoch {epoch}, batch {i}, loss={avg_loss}, standard_loss={avg_standard}, attractor_loss={avg_attractor}', file=wf)
+                    losses_to_log, standard_losses_to_log, attractor_losses_to_log = [], [], []
+                else:
+                    losses_to_log.append(loss.item())
+                    standard_losses_to_log.append(separate_losses['standard'])
+                    attractor_losses_to_log.append(separate_losses['attractor'])
+
+            save_checkpoint(args, epoch+1, model, optimizer, loss)
+
+            with torch.no_grad():
+                model.eval()
+                for i, batch in enumerate(dev_loader):
+                    features = batch['xs']
+                    labels = batch['ts']
+                    n_speakers = np.asarray([max(torch.where(t.sum(0) != 0)[0]) + 1
+                                            if t.sum() > 0 else 0 for t in labels])
+                    max_n_speakers = max(n_speakers)
+                    features, labels = pad_sequence(
+                        features, labels, args.num_frames)
+                    labels = pad_labels(labels, max_n_speakers)
+                    features = torch.stack(features).to(args.device)
+                    labels = torch.stack(labels).to(args.device)
+                    _, acum_dev_metrics, _ = compute_loss_and_metrics(
+                        model, labels, features, n_speakers, acum_dev_metrics,
+                        args.vad_loss_weight,
+                        args.detach_attractor_loss)
+            for k in acum_dev_metrics.keys():
+                writer.add_scalar(
+                    f"dev_{k}", acum_dev_metrics[k] / dev_batches_qty,
+                    epoch * dev_batches_qty + i)
+            acum_dev_metrics = reset_metrics(acum_dev_metrics)
