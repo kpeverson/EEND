@@ -301,8 +301,6 @@ if __name__ == '__main__':
             for i, batch in enumerate(train_loader):
                 features = batch['xs']
                 labels = batch['ts']
-                print(f'features shapes: {[f.shape for f in features]}')
-                print(f'labels shapes: {[l.shape for l in labels]}')
                 n_speakers = np.asarray([max(torch.where(t.sum(0) != 0)[0]) + 1
                                         if t.sum() > 0 else 0 for t in labels])
                 max_n_speakers = max(n_speakers)
@@ -315,14 +313,15 @@ if __name__ == '__main__':
                 labels = pad_labels(labels, max_n_speakers)
                 features = torch.stack(features).to(args.device)
                 labels = torch.stack(labels).to(args.device)
-                print(f'features shape: {features.shape}')
-                print(f'labels shape: {labels.shape}')
-                print(f'n_speakers: {n_speakers}')
-                exit()
+                # print(f'features shape: {features.shape}')
+                # print(f'labels shape: {labels.shape}')
+                # print(f'n_speakers: {n_speakers}')
                 loss, acum_train_metrics, separate_losses = compute_loss_and_metrics(
                     model, labels, features, n_speakers, acum_train_metrics,
                     args.vad_loss_weight,
                     args.detach_attractor_loss)
+                print(f'loss: {loss}')
+                # exit()
                 if i % args.log_report_batches_num == \
                         (args.log_report_batches_num-1):
                     for k in acum_train_metrics.keys():
