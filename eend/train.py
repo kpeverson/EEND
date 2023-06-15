@@ -301,6 +301,8 @@ if __name__ == '__main__':
             for i, batch in enumerate(train_loader):
                 features = batch['xs']
                 labels = batch['ts']
+                print(f'features shapes: {[f.shape for f in features]}')
+                print(f'labels shapes: {[l.shape for l in labels]}')
                 n_speakers = np.asarray([max(torch.where(t.sum(0) != 0)[0]) + 1
                                         if t.sum() > 0 else 0 for t in labels])
                 max_n_speakers = max(n_speakers)

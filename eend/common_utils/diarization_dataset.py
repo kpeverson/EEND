@@ -80,6 +80,7 @@ class KaldiDiarizationDataset(torch.utils.data.Dataset):
                         use_last_samples,
                         min_length
                 ):
+                    print(f'data_len = {data_len}, st = {st}, ed = {ed}')
                     self.chunk_indices.append(
                         (rec, st * self.subsampling, ed * self.subsampling))
             else:

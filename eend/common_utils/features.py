@@ -8,6 +8,7 @@ from common_utils.kaldi_data import KaldiData
 from typing import Callable, Tuple
 import numpy as np
 import librosa
+import soundfile as sf
 
 def get_labeled_wav(
     kaldi_obj: KaldiData,
@@ -38,10 +39,13 @@ def get_labeled_wav(
         T: label
             (n_frmaes, n_speakers)-shaped np.int32 array.
     """
+    # get start and end times in seconds
+
     data, rate = kaldi_obj.load_wav(
-        rec, start * frame_shift, end * frame_shift)
-    if rate != target_sample_rate:
-        data = librosa.resample(data, orig_sr=rate, target_sr=target_sample_rate)
+        rec, start * frame_shift, end * frame_shift, target_sample_rate
+    )
+    # print(f'get_labeled_wav: rec={rec}, start={start*frame_shift}, end={end*frame_shift}')
+    # print(f'data len: {len(data)}')
     filtered_segments = kaldi_obj.segments[rec]
     speakers = np.unique(
         [kaldi_obj.utt2spk[seg['utt']] for seg

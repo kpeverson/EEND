@@ -8,6 +8,7 @@
 
 
 import io
+import librosa
 import numpy as np
 import os
 import soundfile as sf
@@ -49,7 +50,8 @@ def load_wav_scp(wav_scp_file: str) -> Dict[str, str]:
 def load_wav(
     wav_rxfilename: str,
     start: int,
-    end: int
+    end: int,
+    target_sample_rate: int = -1,
 ) -> Tuple[np.ndarray, int]:
     """ This function reads audio file and return data in numpy.float32 array.
         "lru_cache" holds recently loaded audio so that can be called
@@ -72,7 +74,14 @@ def load_wav(
         data = data[start:end]
     else:
         # normal wav file
-        data, samplerate = sf.read(wav_rxfilename, start=start, stop=end)
+        # load all data, then resample (if target_sample_rate!=-1), then slice
+        # data, samplerate = sf.read(wav_rxfilename, start=start, stop=end)
+        data, samplerate = sf.read(wav_rxfilename)
+        if target_sample_rate != -1 and samplerate != target_sample_rate:
+            data = librosa.resample(data, orig_sr=samplerate, target_sr=target_sample_rate)
+            samplerate = target_sample_rate
+        data = data[start:end]
+
     return data, samplerate
 
 
@@ -116,8 +125,9 @@ class KaldiData:
         self,
         recid: str,
         start: int,
-        end: int
+        end: int,
+        target_sample_rate: int = -1,
     ) -> Tuple[np.ndarray, int]:
         data, rate = load_wav(
-            self.wavs[recid], start, end)
+            self.wavs[recid], start, end, target_sample_rate)
         return data, rate

@@ -586,7 +586,6 @@ def pad_sequence(
             # pad labels to seq_len, features to seq_len*frame_shift*subsample
             labels_length = labels[i].shape[0]
             features_length = features[i].shape[0]
-            print(f"Sequence of length {labels_length} was received but only {seq_len} was expected")
             if labels_length < seq_len:
                 labels_extend = seq_len - labels_length
                 labels_padded.append(torch.cat((labels[i], -torch.ones((
