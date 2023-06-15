@@ -9,6 +9,75 @@ from typing import Callable, Tuple
 import numpy as np
 import librosa
 
+def get_labeled_wav(
+    kaldi_obj: KaldiData,
+    rec: str,
+    start: int,
+    end: int,
+    frame_shift: int,
+    n_speakers: int = None,   
+    use_speaker_id: bool = False,
+    target_sample_rate: int = 16000, 
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Extracts waveform and corresponding diarization labels for
+    given recording id and start/end times
+    Args:
+        kaldi_obj (KaldiData)
+        rec (str): recording id
+        start (int): start frame index
+        end (int): end frame index
+        frame_shift (int): number of shift samples
+        n_speakers (int): number of speakers
+            if None, the value is given from data
+        use_speaker_id (bool): if True, speaker id is used as label
+        target_sample_rate (int): target sample rate (resample if necessary)
+    Returns:
+        Y: waveform
+            (n_samples)-shaped np array
+        T: label
+            (n_frmaes, n_speakers)-shaped np.int32 array.
+    """
+    data, rate = kaldi_obj.load_wav(
+        rec, start * frame_shift, end * frame_shift)
+    if rate != target_sample_rate:
+        data = librosa.resample(data, orig_sr=rate, target_sr=target_sample_rate)
+    filtered_segments = kaldi_obj.segments[rec]
+    speakers = np.unique(
+        [kaldi_obj.utt2spk[seg['utt']] for seg
+         in filtered_segments]).tolist()
+    if n_speakers is None:
+        n_speakers = len(speakers)
+    T_len = data.shape[0] // frame_shift
+    T = np.zeros((T_len, n_speakers), dtype=np.int32)
+
+    if use_speaker_id:
+        all_speakers = sorted(kaldi_obj.spk2utt.keys())
+        S = np.zeros((T.shape[0], len(all_speakers)), dtype=np.int32)
+
+    for seg in filtered_segments:
+        speaker_index = speakers.index(kaldi_obj.utt2spk[seg['utt']])
+        if use_speaker_id:
+            all_speaker_index = all_speakers.index(
+                kaldi_obj.utt2spk[seg['utt']])
+        start_frame = np.rint(
+            seg['st'] * target_sample_rate / frame_shift).astype(int)
+        end_frame = np.rint(
+            seg['et'] * target_sample_rate / frame_shift).astype(int)
+        rel_start = rel_end = None
+        if start <= start_frame and start_frame < end:
+            rel_start = start_frame - start
+        if start < end_frame and end_frame <= end:
+            rel_end = end_frame - start
+        if rel_start is not None or rel_end is not None:
+            T[rel_start:rel_end, speaker_index] = 1
+            if use_speaker_id:
+                S[rel_start:rel_end, all_speaker_index] = 1
+
+    if use_speaker_id:
+        return data, T, S
+    else:
+        return data, T
 
 def get_labeledSTFT(
     kaldi_obj: KaldiData,

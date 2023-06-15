@@ -48,6 +48,7 @@ class KaldiDiarizationDataset(torch.utils.data.Dataset):
         subsampling: int,
         use_last_samples: bool,
         min_length: int,
+        apply_STFT: bool,
         dtype: type = np.float32,
     ):
         self.data_dir = data_dir
@@ -62,6 +63,7 @@ class KaldiDiarizationDataset(torch.utils.data.Dataset):
         self.n_speakers = n_speakers
         self.sampling_rate = sampling_rate
         self.chunk_indices = []
+        self.apply_STFT = apply_STFT
 
         self.data = kaldi_data.KaldiData(self.data_dir)
 
@@ -93,26 +95,51 @@ class KaldiDiarizationDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, i: int) -> Tuple[np.ndarray, np.ndarray]:
         rec, st, ed = self.chunk_indices[i]
-        Y, T = features.get_labeledSTFT(
-            self.data,
-            rec,
-            st,
-            ed,
-            self.frame_size,
-            self.frame_shift,
-            self.n_speakers
-        )
-        Y = features.transform(
-            Y, self.sampling_rate, self.feature_dim, self.input_transform)
-        Y_spliced = features.splice(Y, self.context_size)
-        Y_ss, T_ss = features.subsample(Y_spliced, T, self.subsampling)
+        if self.apply_STFT:
+            Y, T = features.get_labeledSTFT(
+                self.data,
+                rec,
+                st,
+                ed,
+                self.frame_size,
+                self.frame_shift,
+                self.n_speakers
+            )
+            Y = features.transform(
+                Y, self.sampling_rate, self.feature_dim, self.input_transform)
+            Y_spliced = features.splice(Y, self.context_size)
+            Y_ss, T_ss = features.subsample(Y_spliced, T, self.subsampling)
 
-        # If the sample contains more than "self.n_speakers" speakers,
-        #  extract top-(self.n_speakers) speakers
-        if self.n_speakers and T_ss.shape[1] > self.n_speakers:
-            selected_spkrs = np.argsort(
-                T_ss.sum(axis=0))[::-1][:self.n_speakers]
-            T_ss = T_ss[:, selected_spkrs]
+            # If the sample contains more than "self.n_speakers" speakers,
+            #  extract top-(self.n_speakers) speakers
+            if self.n_speakers and T_ss.shape[1] > self.n_speakers:
+                selected_spkrs = np.argsort(
+                    T_ss.sum(axis=0))[::-1][:self.n_speakers]
+                T_ss = T_ss[:, selected_spkrs]
 
-        return torch.from_numpy(np.copy(Y_ss)), torch.from_numpy(
-            np.copy(T_ss)), rec
+            return torch.from_numpy(np.copy(Y_ss)), torch.from_numpy(
+                np.copy(T_ss)), rec
+        else:
+            Y, T = features.get_labeled_wav(
+                self.data,
+                rec,
+                st,
+                ed,
+                self.frame_shift,
+                self.n_speakers,
+                target_sample_rate=self.sampling_rate
+            )
+            # subsampling for Y happens after passing thru conv layer
+            _, T_ss = features.subsample(Y, T, self.subsampling)
+
+            # If the sample contains more than "self.n_speakers" speakers,
+            #  extract top-(self.n_speakers) speakers
+            if self.n_speakers and T_ss.shape[1] > self.n_speakers:
+                selected_spkrs = np.argsort(
+                    T_ss.sum(axis=0))[::-1][:self.n_speakers]
+                T_ss = T_ss[:, selected_spkrs]
+
+            return torch.from_numpy(np.copy(Y)), torch.from_numpy(
+                np.copy(T_ss)), rec
+
+        

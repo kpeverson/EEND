@@ -73,6 +73,10 @@ def compute_loss_and_metrics(
 def get_training_dataloaders(
     args: SimpleNamespace
 ) -> Tuple[DataLoader, DataLoader]:
+    if args.model_type == 'SpeakervecEDA':
+        apply_STFT = False
+    else:
+        apply_STFT = True
     train_set = KaldiDiarizationDataset(
         args.train_data_dir,
         chunk_size=args.num_frames,
@@ -87,6 +91,7 @@ def get_training_dataloaders(
         subsampling=args.subsampling,
         use_last_samples=args.use_last_samples,
         min_length=args.min_length,
+        apply_STFT=apply_STFT,
     )
     train_loader = DataLoader(
         train_set,
@@ -111,6 +116,7 @@ def get_training_dataloaders(
         subsampling=args.subsampling,
         use_last_samples=args.use_last_samples,
         min_length=args.min_length,
+        apply_STFT=apply_STFT,
     )
     dev_loader = DataLoader(
         dev_set,
@@ -121,15 +127,16 @@ def get_training_dataloaders(
         worker_init_fn=_init_fn,
     )
 
-    Y_train, _, _ = train_set.__getitem__(0)
-    Y_dev, _, _ = dev_set.__getitem__(0)
-    assert Y_train.shape[1] == Y_dev.shape[1], \
-        f"Train features dimensionality ({Y_train.shape[1]}) and \
-        dev features dimensionality ({Y_dev.shape[1]}) differ."
-    assert Y_train.shape[1] == (
-        args.feature_dim * (1 + 2 * args.context_size)), \
-        f"Expected feature dimensionality of {args.feature_dim} \
-        but {Y_train.shape[1]} found."
+    if apply_STFT:
+        Y_train, _, _ = train_set.__getitem__(0)
+        Y_dev, _, _ = dev_set.__getitem__(0)
+        assert Y_train.shape[1] == Y_dev.shape[1], \
+            f"Train features dimensionality ({Y_train.shape[1]}) and \
+            dev features dimensionality ({Y_dev.shape[1]}) differ."
+        assert Y_train.shape[1] == (
+            args.feature_dim * (1 + 2 * args.context_size)), \
+            f"Expected feature dimensionality of {args.feature_dim} \
+            but {Y_train.shape[1]} found."
 
     return train_loader, dev_loader
 
@@ -144,8 +151,8 @@ def parse_arguments() -> SimpleNamespace:
     parser.add_argument('--encoder-units', type=int,
                         help='number of units in the encoder')
     parser.add_argument('--feature-dim', type=int)
-    parser.add_argument('--frame-shift', type=int)
-    parser.add_argument('--frame-size', type=int)
+    parser.add_argument('--frame-shift', default=80, type=int)
+    parser.add_argument('--frame-size', default=200, type=int)
     parser.add_argument('--gpu', '-g', default=-1, type=int,
                         help='GPU ID (negative value indicates CPU)')
     parser.add_argument('--gradclip', default=-1, type=int,
@@ -182,7 +189,7 @@ def parse_arguments() -> SimpleNamespace:
     parser.add_argument('--optimizer', default='adam', type=str)
     parser.add_argument('--output-path', type=str)
     parser.add_argument('--log_interval', default=10, type=int)
-    parser.add_argument('--sampling-rate', type=int)
+    parser.add_argument('--sampling-rate', default=8000, type=int)
     parser.add_argument('--seed', type=int)
     parser.add_argument('--subsampling', default=10, type=int)
     parser.add_argument('--train-batchsize', default=1, type=int,
@@ -231,7 +238,6 @@ if __name__ == '__main__':
     os.environ['PYTHONHASHSEED'] = str(args.seed)
 
     logging.info(args)
-    print(args)
 
     writer = SummaryWriter(f"{args.output_path}/tensorboard")
     log_file = os.path.join(args.output_path, 'train.log')
@@ -239,14 +245,24 @@ if __name__ == '__main__':
     if args.gpu >= 1:
         gpuid = use_single_gpu(args.gpu)
         logging.info('GPU device {} is used'.format(gpuid))
-        print('GPU device {} is used'.format(gpuid))
         args.device = torch.device("cuda")
     else:
         gpuid = -1
         args.device = torch.device("cpu")
 
+    # get chunk size in seconds
+    # chunk_size_s = args.chunk_size * 
+
     if args.init_model_path == '':
         model = get_model(args)
+        # if using speakervec model, override frame_shift and sample_rate
+        if args.model_type == 'SpeakervecEDA':
+            args.frame_shift = model.frame_shift
+            # alert if provided sampling rate and model sampling rate are different
+            if args.sampling_rate != model.sample_rate:
+                logging.warning(f"Sampling rate {args.sampling_rate} is different from"
+                                f" model sampling rate {model.sample_rate}. Overriding to {model.sample_rate}")
+            args.sampling_rate = model.sample_rate
         optimizer = setup_optimizer(args, model)
     else:
         model = get_model(args)
@@ -260,8 +276,6 @@ if __name__ == '__main__':
     dev_batches_qty = len(dev_loader)
     logging.info(f"#batches quantity for train: {train_batches_qty}")
     logging.info(f"#batches quantity for dev: {dev_batches_qty}")
-    print(f"#batches quantity for train: {train_batches_qty}")
-    print(f"#batches quantity for dev: {dev_batches_qty}")
 
     acum_train_metrics = new_metrics()
     acum_dev_metrics = new_metrics()
@@ -290,10 +304,19 @@ if __name__ == '__main__':
                 n_speakers = np.asarray([max(torch.where(t.sum(0) != 0)[0]) + 1
                                         if t.sum() > 0 else 0 for t in labels])
                 max_n_speakers = max(n_speakers)
-                features, labels = pad_sequence(features, labels, args.num_frames)
+                if args.model_type == 'TransformerEDA':
+                    # pad features/labels according to args.num_frames
+                    features, labels = pad_sequence(features, labels, args.num_frames)
+                elif args.model_type == 'SpeakervecEDA':
+                    # pad labels to args.num_frames, features to arg.num_frames*args.frame_shift*args.subsampling
+                    features, labels = pad_sequence(features, labels, args.num_frames, frame_shift=args.frame_shift, subsample=args.subsampling)
                 labels = pad_labels(labels, max_n_speakers)
                 features = torch.stack(features).to(args.device)
                 labels = torch.stack(labels).to(args.device)
+                print(f'features shape: {features.shape}')
+                print(f'labels shape: {labels.shape}')
+                print(f'n_speakers: {n_speakers}')
+                exit()
                 loss, acum_train_metrics, separate_losses = compute_loss_and_metrics(
                     model, labels, features, n_speakers, acum_train_metrics,
                     args.vad_loss_weight,
@@ -314,7 +337,6 @@ if __name__ == '__main__':
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.gradclip)
                 optimizer.step()
-                print(f'batch {i}, acum_train_metrics: {acum_train_metrics}')
                 if i%args.log_interval==0:
                     if i==0:
                         avg_loss = loss.item()
@@ -324,6 +346,7 @@ if __name__ == '__main__':
                         avg_loss = sum(losses_to_log)/len(losses_to_log)
                         avg_standard = sum(standard_losses_to_log)/len(standard_losses_to_log)
                         avg_attractor = sum(attractor_losses_to_log)/len(attractor_losses_to_log)
+                    print(f'batch {i}, acum_train_metrics: {acum_train_metrics}')
                     print(f'epoch {epoch}, batch {i}, loss={avg_loss}, standard_loss={avg_standard}, attractor_loss={avg_attractor}', file=wf)
                     losses_to_log, standard_losses_to_log, attractor_losses_to_log = [], [], []
                 else:

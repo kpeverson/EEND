@@ -399,6 +399,11 @@ class SpeakervecEDADiarization(Module):
         self,
         device: torch.device,
         pretrained_path: str,
+        vad_loss_weight: float,
+        attractor_loss_ratio: float,
+        attractor_encoder_dropout: float,
+        attractor_decoder_dropout: float,
+        detach_attractor_loss: bool,
     ) -> None:
         """ Self-attention-based diarization model.
         Args:
@@ -413,21 +418,24 @@ class SpeakervecEDADiarization(Module):
           attractor_decoder_dropout (float)
         """
         self.device = device
-        # super(TransformerEDADiarization, self).__init__()
+        super(SpeakervecEDADiarization, self).__init__()
         speakervec_encoder = Speakervec2Model.from_pretrained(
                 os.path.dirname(pretrained_path),
                 checkpoint_file=os.path.basename(pretrained_path),
         )
-        speakervec_model = speakervec_encoder.models[0]
-        speakervec_config = speakervec_encoder.cfg
-        print(f'speakervec_encoder: {speakervec_config}')
-        exit()
+        self.enc = speakervec_encoder.models[0]
+        self.cfg = speakervec_encoder.cfg
+        feature_enc_layers = eval(self.cfg['model']['conv_feature_layers'])
+        self.sample_rate = self.cfg['task']['sample_rate']
+        self.frame_shift = np.prod([s for _, _, s in feature_enc_layers])
+        self.embed_dim = self.cfg['model']['encoder_embed_dim']
+        
         # self.enc = TransformerEncoder(
         #     self.device, in_size, n_layers, n_units, e_units, n_heads, dropout
         # )
         self.eda = EncoderDecoderAttractor(
             self.device,
-            n_units,
+            self.embed_dim,
             attractor_encoder_dropout,
             attractor_decoder_dropout,
             detach_attractor_loss,
@@ -436,13 +444,13 @@ class SpeakervecEDADiarization(Module):
         self.vad_loss_weight = vad_loss_weight
 
     def get_embeddings(self, xs: torch.Tensor) -> torch.Tensor:
-        ilens = [x.shape[0] for x in xs]
-        # xs: (B, T, F)
-        pad_shape = xs.shape
-        # emb: (B*T, E)
-        emb = self.enc(xs)
-        # emb: [(T, E), ...]
-        emb = emb.reshape(pad_shape[0], pad_shape[1], -1)
+
+        # spk_embed and spk are dummy variables required by speakervec encoder
+        spk_embed = torch.zeros((1,self.embed_dim))
+        spk = torch.LongTensor([[-1]])
+
+        emb = self.enc(xs, spk_embed, spk, features_only=True)['x'][0]
+
         return emb
 
     def estimate_sequential(
@@ -544,30 +552,59 @@ def pad_labels(ts: torch.Tensor, out_size: int) -> torch.Tensor:
 def pad_sequence(
     features: List[torch.Tensor],
     labels: List[torch.Tensor],
-    seq_len: int
+    seq_len: int,
+    frame_shift: int = -1, 
+    subsample: int = -1
 ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
     features_padded = []
     labels_padded = []
     assert len(features) == len(labels), (
         f"Features and labels in batch were expected to match but got "
-        "{len(features)} features and {len(labels)} labels.")
+        f"{len(features)} features and {len(labels)} labels.")
     for i, _ in enumerate(features):
-        assert features[i].shape[0] == labels[i].shape[0], (
-            f"Length of features and labels were expected to match but got "
-            "{features[i].shape[0]} and {labels[i].shape[0]}")
-        length = features[i].shape[0]
-        if length < seq_len:
-            extend = seq_len - length
-            features_padded.append(torch.cat((features[i], -torch.ones((
-                extend, features[i].shape[1]))), dim=0))
-            labels_padded.append(torch.cat((labels[i], -torch.ones((
-                extend, labels[i].shape[1]))), dim=0))
-        elif length > seq_len:
-            raise (f"Sequence of length {length} was received but only "
-                   "{seq_len} was expected.")
+        # assert (
+        #     features[i].shape[0] == labels[i].shape[0] or features[i].shape[0] == labels[i].shape[0]*frame_shift*subsample
+        # ), (
+        #     f"Length of features and labels were expected to match but got "
+        #     f"{features[i].shape[0]} and {labels[i].shape[0]}"
+        # )
+        if frame_shift==-1 or subsample==-1:
+            # pad features and labels identically
+            length = features[i].shape[0]
+            if length < seq_len:
+                extend = seq_len - length
+                features_padded.append(torch.cat((features[i], -torch.ones((
+                    extend, features[i].shape[1]))), dim=0))
+                labels_padded.append(torch.cat((labels[i], -torch.ones((
+                    extend, labels[i].shape[1]))), dim=0))
+            elif length > seq_len:
+                raise f"Sequence of length {length} was received but only {seq_len} was expected."
+            else:
+                features_padded.append(features[i])
+                labels_padded.append(labels[i])
         else:
-            features_padded.append(features[i])
-            labels_padded.append(labels[i])
+            # pad labels to seq_len, features to seq_len*frame_shift*subsample
+            labels_length = labels[i].shape[0]
+            features_length = features[i].shape[0]
+            print(f"Sequence of length {labels_length} was received but only {seq_len} was expected")
+            if labels_length < seq_len:
+                labels_extend = seq_len - labels_length
+                labels_padded.append(torch.cat((labels[i], -torch.ones((
+                    labels_extend, labels[i].shape[1]))), dim=0))
+                features_extend = seq_len*frame_shift*subsample - features_length
+                # if features has more than one dim, torch.ones must have the same dim
+                if len(features[i].shape) > 1:
+                    features_padded.append(torch.cat((features[i], -torch.ones((
+                        features_extend, features[i].shape[1]))), dim=0))
+                else:
+                    features_padded.append(torch.cat((features[i], -torch.ones((
+                        features_extend,))), dim=0))
+            elif labels_length > seq_len:
+                raise ValueError(f"Sequence of length {labels_length} was received but only {seq_len} was expected.")
+            else:
+                labels_padded.append(labels[i])
+                features_padded.append(features[i])
+
     return features_padded, labels_padded
 
 
@@ -627,7 +664,13 @@ def get_model(args: SimpleNamespace) -> Module:
         model = SpeakervecEDADiarization(
             device=args.device,
             pretrained_path=args.pretrained_speakervec_path,
+            attractor_loss_ratio=args.attractor_loss_ratio,
+            attractor_encoder_dropout=args.attractor_encoder_dropout,
+            attractor_decoder_dropout=args.attractor_decoder_dropout,
+            detach_attractor_loss=args.detach_attractor_loss,
+            vad_loss_weight=args.vad_loss_weight,
         )
+        frame_shift = model.frame_shift
     else:
         raise ValueError('Possible model_type is "TransformerEDA"')
     return model
