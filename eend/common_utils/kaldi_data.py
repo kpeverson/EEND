@@ -14,6 +14,7 @@ import os
 import soundfile as sf
 import subprocess
 import sys
+import torchaudio
 from functools import lru_cache
 from typing import Any, Dict, Tuple
 
@@ -76,10 +77,17 @@ def load_wav(
         # normal wav file
         # load all data, then resample (if target_sample_rate!=-1), then slice
         # data, samplerate = sf.read(wav_rxfilename, start=start, stop=end)
-        data, samplerate = sf.read(wav_rxfilename)
+        # data, samplerate = sf.read(wav_rxfilename)
+        data, samplerate = torchaudio.load(wav_rxfilename)
         if target_sample_rate != -1 and samplerate != target_sample_rate:
-            data = librosa.resample(data, orig_sr=samplerate, target_sr=target_sample_rate)
+            # data = librosa.resample(data, orig_sr=samplerate, target_sr=target_sample_rate)
+            data = torchaudio.transforms.Resample(
+                orig_freq=samplerate, new_freq=target_sample_rate)(data)
             samplerate = target_sample_rate
+        # if 2-dim, make it 1-dim (dim 0 corresponds to channels)
+        if len(data.shape) == 2:
+            data = data.mean(dim=0)
+
         data = data[start:end]
 
     return data, samplerate
