@@ -404,6 +404,7 @@ class SpeakervecEDADiarization(Module):
         attractor_encoder_dropout: float,
         attractor_decoder_dropout: float,
         detach_attractor_loss: bool,
+        subsample_rate: int = -1
     ) -> None:
         """ Self-attention-based diarization model.
         Args:
@@ -423,12 +424,13 @@ class SpeakervecEDADiarization(Module):
                 os.path.dirname(pretrained_path),
                 checkpoint_file=os.path.basename(pretrained_path),
         )
-        self.enc = speakervec_encoder.models[0]
+        self.enc = speakervec_encoder.models[0].to(self.device)
         self.cfg = speakervec_encoder.cfg
         feature_enc_layers = eval(self.cfg['model']['conv_feature_layers'])
         self.sample_rate = self.cfg['task']['sample_rate']
         self.frame_shift = np.prod([s for _, _, s in feature_enc_layers])
         self.embed_dim = self.cfg['model']['encoder_embed_dim']
+        self.subsample_rate = subsample_rate
         
         # self.enc = TransformerEncoder(
         #     self.device, in_size, n_layers, n_units, e_units, n_heads, dropout
@@ -449,7 +451,9 @@ class SpeakervecEDADiarization(Module):
         spk_embed = torch.zeros((1,self.embed_dim))
         spk = torch.LongTensor([[-1]])
 
-        emb = self.enc(xs, spk_embed, spk, features_only=True)['x'][0]
+        emb = self.enc(
+            xs, spk_embed, spk, features_only=True, subsample_rate=self.subsample_rate
+        )['x'][0]
 
         return emb
 
@@ -495,6 +499,7 @@ class SpeakervecEDADiarization(Module):
         n_speakers: List[int],
         args: SimpleNamespace
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        # print(f'xs.shape: {xs.shape}')
         emb = self.get_embeddings(xs)
 
         if args.time_shuffle:
@@ -668,6 +673,7 @@ def get_model(args: SimpleNamespace) -> Module:
             attractor_decoder_dropout=args.attractor_decoder_dropout,
             detach_attractor_loss=args.detach_attractor_loss,
             vad_loss_weight=args.vad_loss_weight,
+            subsample_rate=args.subsampling,
         )
         frame_shift = model.frame_shift
     else:
