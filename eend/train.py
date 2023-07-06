@@ -320,8 +320,6 @@ if __name__ == '__main__':
                     model, labels, features, n_speakers, acum_train_metrics,
                     args.vad_loss_weight,
                     args.detach_attractor_loss)
-                print(f'loss: {loss}')
-                # exit()
                 if i % args.log_report_batches_num == \
                         (args.log_report_batches_num-1):
                     for k in acum_train_metrics.keys():
@@ -347,7 +345,8 @@ if __name__ == '__main__':
                         avg_loss = sum(losses_to_log)/len(losses_to_log)
                         avg_standard = sum(standard_losses_to_log)/len(standard_losses_to_log)
                         avg_attractor = sum(attractor_losses_to_log)/len(attractor_losses_to_log)
-                    print(f'batch {i}, acum_train_metrics: {acum_train_metrics}')
+                    # print(f'batch {i}, acum_train_metrics: {acum_train_metrics}')
+                    print(f'epoch {epoch}, batch {i}, loss={avg_loss}, standard_loss={avg_standard}, attractor_loss={avg_attractor}')
                     print(f'epoch {epoch}, batch {i}, loss={avg_loss}, standard_loss={avg_standard}, attractor_loss={avg_attractor}', file=wf)
                     losses_to_log, standard_losses_to_log, attractor_losses_to_log = [], [], []
                 else:

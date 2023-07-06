@@ -26,6 +26,10 @@ import yamlargparse
 
 
 def get_infer_dataloader(args: SimpleNamespace) -> DataLoader:
+    if args.model_type == 'SpeakervecEDA':
+        apply_STFT = False
+    else:
+        apply_STFT = True
     infer_set = KaldiDiarizationDataset(
         args.infer_data_dir,
         chunk_size=args.num_frames,
@@ -40,6 +44,7 @@ def get_infer_dataloader(args: SimpleNamespace) -> DataLoader:
         subsampling=args.subsampling,
         use_last_samples=True,
         min_length=0,
+        apply_STFT=apply_STFT,
     )
     infer_loader = DataLoader(
         infer_set,
@@ -50,11 +55,13 @@ def get_infer_dataloader(args: SimpleNamespace) -> DataLoader:
         worker_init_fn=_init_fn,
     )
 
-    Y, _, _ = infer_set.__getitem__(0)
-    assert Y.shape[1] == \
-        (args.feature_dim * (1 + 2 * args.context_size)), \
-        f"Expected feature dimensionality of \
-        {args.feature_dim} but {Y.shape[1]} found."
+    if apply_STFT:
+        Y, _, _ = infer_set.__getitem__(0)
+        assert Y.shape[1] == \
+            (args.feature_dim * (1 + 2 * args.context_size)), \
+            f"Expected feature dimensionality of \
+            {args.feature_dim} but {Y.shape[1]} found."
+
     return infer_loader
 
 
@@ -129,10 +136,10 @@ def postprocess_output(
     threshold: float,
     median_window_length: int
 ) -> np.ndarray:
-    thresholded = probabilities > threshold
+    # thresholded = probabilities > threshold
     # Use this instead if it fails with newer medfilt version
     # (see https://github.com/scipy/scipy/issues/16648)
-    # thresholded = 1.0 * (probabilities > threshold)
+    thresholded = 1.0 * (probabilities > threshold)
     filtered = np.zeros(thresholded.shape)
     for spk in range(filtered.shape[1]):
         filtered[:, spk] = medfilt(
@@ -167,7 +174,9 @@ def parse_arguments() -> SimpleNamespace:
     parser.add_argument('--log-report-batches-num', default=1, type=float)
     parser.add_argument('--median-window-length', default=11, type=int)
     parser.add_argument('--model-type', default='TransformerEDA',
-                        help='Type of model (for now only TransformerEDA)')
+                        help='Type of model (for now only TransformerEDA, SpeakervecEDA)')
+    parser.add_argument('--pretrained-speakervec-path', default='',
+                        help='specify the path of Speakervec model (just used to initialize)')
     parser.add_argument('--models-path', type=str,
                         help='directory with model(s) to evaluate')
     parser.add_argument('--num-frames', default=-1, type=int,
